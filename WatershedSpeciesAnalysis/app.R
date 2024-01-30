@@ -1,86 +1,143 @@
+# Load libraries
 library(shiny)
+library(ggplot2)
+library(vegan)
+library(ggforce)
 library(DT)
 
-# 定義 UI
+# Define UI
 ui <- fluidPage(
-  titlePanel("CSV Viewer with Column Selection"),
-  
-  # 上傳 CSV 檔案
-  fileInput("file", "Choose CSV File",
-            accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
-  
-  # 下拉式選單，用於選擇河川名稱
-  selectInput("river_select", "Select River", NULL),
-  
-  # 下拉式選單，用於選擇物種
-  selectInput("species_select", "Select Species", NULL),
-  
-  # 顯示表格
-  DTOutput("table"),
-  
-  # 顯示不同的物種
-  verbatimTextOutput("unique_species"),
-  
-  # 顯示所有不同的河川
-  verbatimTextOutput("unique_rivers"),
-  
-  # 顯示二維表格
-  DTOutput("binary_matrix")
+  titlePanel("Combined Shiny App"),
+  tabsetPanel(
+    tabPanel("NMDS Visualization",
+             sidebarLayout(
+               sidebarPanel(
+                 fileInput("file_nmds", "Choose CSV File",
+                           accept = c("text/csv",
+                                      "text/comma-separated-values,text/plain",
+                                      ".csv")),
+                 helpText("Note: Please upload a CSV file with binary matrix data.")
+               ),
+               mainPanel(
+                 plotOutput("nmdsPlot")
+               )
+             )
+    ),
+    tabPanel("CSV Viewer with Column Selection",
+             sidebarLayout(
+               sidebarPanel(
+                 fileInput("file_csv", "Choose CSV File",
+                           accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
+                 selectInput("river_select", "Select River", NULL),
+                 selectInput("species_select", "Select Species", NULL)
+               ),
+               mainPanel(
+                 DTOutput("table"),
+                 verbatimTextOutput("unique_species"),
+                 verbatimTextOutput("unique_rivers"),
+                 DTOutput("binary_matrix"),
+                 downloadButton("save_button", "Save Binary Matrix")
+               )
+             )
+    )
+  )
 )
 
-# 定義 server 邏輯
+# Define server
 server <- function(input, output, session) {
   
-  # 讀取 CSV 檔案
-  data <- reactive({
-    req(input$file)  # 確保檔案已經被選取
-    read.csv(input$file$datapath)
+  # Read data for NMDS
+  data_LAN <- reactive({
+    inFile <- input$file_nmds
+    if (is.null(inFile)) return(NULL)
+    read.csv(inFile$datapath, header = TRUE, row.names = 1)
   })
   
-  # 更新下拉式選單的選項
+  # Perform NMDS and create plot
+  output$nmdsPlot <- renderPlot({
+    req(data_LAN())
+    
+    dfNmds <- metaMDS(data_LAN(), distance = "bray", k = 2, trymax = 100)
+    data <- data.frame(dfNmds$points)
+    
+    ggplot(data, aes(x = MDS1, y = MDS2)) +
+      geom_point(size = 2) +
+      theme_classic() +
+      geom_text(
+        aes(label = rownames(data)),
+        vjust = 1.5,
+        size = 3,
+        color = "black"
+      ) +
+      labs(
+        subtitle = paste("stress=", round(dfNmds$stress, 3), sep = "")
+      )
+  })
+  
+  # Read data for CSV Viewer
+  data_csv <- reactive({
+    req(input$file_csv)  # Ensure file is selected
+    read.csv(input$file_csv$datapath)
+  })
+  
+  # Update dropdown options
   observe({
-    col_options <- names(data())
+    col_options <- names(data_csv())
     updateSelectInput(session, "river_select", choices = col_options)
     updateSelectInput(session, "species_select", choices = col_options)
   })
   
-  # 選擇河川名稱和物種的資料
+  # Reactive value to store binary matrix
+  binary_matrix <- reactiveVal(NULL)
+  
+  # Selected data for CSV Viewer
   selected_data <- reactive({
     req(input$river_select, input$species_select)
-    data_selected <- data()[, c(input$river_select, input$species_select), drop = FALSE]
+    data_selected <- data_csv()[, c(input$river_select, input$species_select), drop = FALSE]
     colnames(data_selected) <- c("River", "Species")
+    
+    # Create binary matrix
+    binary_matrix_data <- table(data_selected$River, data_selected$Species)
+    binary_matrix_data[binary_matrix_data > 1] <- 1
+    binary_matrix(binary_matrix_data)  # Store binary matrix in reactive value
+    
     data_selected
   })
   
-  # 顯示選擇的列
+  # Display selected rows
   output$table <- renderDT({
     datatable(selected_data())
   })
   
-  # 取得物種那一列的所有不同值
+  # Display unique species
   output$unique_species <- renderPrint({
     unique_species <- unique(selected_data()$Species)
     cat("Unique Species: ", paste(unique_species, collapse = ", "))
   })
   
-  # 取得河川那一列的所有不同值
+  # Display unique rivers
   output$unique_rivers <- renderPrint({
     unique_rivers <- unique(selected_data()$River)
     cat("Unique Rivers: ", paste(unique_rivers, collapse = ", "))
   })
   
-  # 顯示二維表格
+  # Display binary matrix
   output$binary_matrix <- renderDT({
-    # 創建二維表格
-    binary_matrix <- table(selected_data()$River, selected_data()$Species)
-    
-    # 轉換成資料框
-    binary_df <- as.data.frame.matrix(binary_matrix)
-    
-    # 顯示表格
-    datatable(binary_df)
+    datatable(binary_matrix())
   })
+  
+  # Save binary matrix
+  output$save_button <- downloadHandler(
+    filename = function() {
+      paste("binary_matrix_", Sys.Date(), ".csv", sep = "")
+    },
+    content = function(file) {
+      # Use isolate to prevent reactiveValues from being accessed reactively
+      write.csv(isolate(binary_matrix()), file, row.names = TRUE)
+    }
+  )
+  
 }
 
-# 執行應用程式
+# Run the Shiny app
 shinyApp(ui = ui, server = server)
